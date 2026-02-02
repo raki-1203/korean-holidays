@@ -1,0 +1,104 @@
+name: Update Korean Holidays
+
+on:
+  schedule:
+    - cron: '0 0 1 * *'  # Every 1st day of month at 00:00 UTC
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  update-holidays:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install requests
+
+      - name: Fetch and update holidays
+        env:
+          DATAGOKR_API_KEY: ${{ secrets.DATAGOKR_API_KEY }}
+        run: |
+          python << 'EOF'
+          import requests
+          import json
+          import os
+          from datetime import datetime
+
+          API_KEY = os.environ.get('DATAGOKR_API_KEY')
+          if not API_KEY:
+              print("Error: DATAGOKR_API_KEY not set")
+              exit(1)
+
+          BASE_URL = "http://apis.data.go.kr/B090041/openapi/service/SpcdeInfoService/getRestDeInfo"
+
+          def fetch_holidays(year):
+              holidays = []
+              params = {
+                  'serviceKey': API_KEY,
+                  'solYear': year,
+                  'numOfRows': 50,
+                  '_type': 'json'
+              }
+              
+              try:
+                  response = requests.get(BASE_URL, params=params, timeout=30)
+                  response.raise_for_status()
+                  data = response.json()
+                  
+                  items = data.get('response', {}).get('body', {}).get('items', {}).get('item', [])
+                  if isinstance(items, dict):
+                      items = [items]
+                  
+                  for item in items:
+                      holidays.append({
+                          'dateKind': item.get('dateKind', '01'),
+                          'dateName': item.get('dateName', ''),
+                          'isHoliday': item.get('isHoliday', 'Y'),
+                          'locdate': item.get('locdate', 0),
+                          'seq': item.get('seq', 1)
+                      })
+                  
+                  return sorted(holidays, key=lambda x: x['locdate'])
+              except Exception as e:
+                  print(f"Error fetching {year}: {e}")
+                  return None
+
+          current_year = datetime.now().year
+          years_to_fetch = [current_year, current_year + 1]
+
+          os.makedirs('holidays', exist_ok=True)
+
+          for year in years_to_fetch:
+              print(f"Fetching {year}...")
+              holidays = fetch_holidays(year)
+              if holidays:
+                  filepath = f'holidays/{year}.json'
+                  with open(filepath, 'w', encoding='utf-8') as f:
+                      json.dump(holidays, f, ensure_ascii=False, indent=2)
+                  print(f"  Saved {len(holidays)} holidays to {filepath}")
+              else:
+                  print(f"  Skipped {year} (no data or error)")
+
+          print("Done!")
+          EOF
+
+      - name: Check for changes
+        id: check_changes
+        run: |
+          git diff --quiet holidays/ || echo "changes=true" >> $GITHUB_OUTPUT
+
+      - name: Commit and push changes
+        if: steps.check_changes.outputs.changes == 'true'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add holidays/
+          git commit -m "chore: update holiday data $(date +%Y-%m-%d)"
+          git push
